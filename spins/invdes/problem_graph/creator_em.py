@@ -1,7 +1,10 @@
 from typing import Callable, List, Optional, Tuple, Union
 
 import numpy as np
+import os
 import scipy.sparse
+import scipy.io as sio
+from scipy.interpolate import RegularGridInterpolator
 
 from spins import fdfd_solvers
 from spins import fdfd_tools
@@ -23,6 +26,7 @@ DIRECT_SOLVER = local_matrix_solvers.MultiprocessingSolver(
 
 @optplan.register_node(optplan.WaveguideModeSource)
 class WaveguideModeSource:
+
     def __init__(self,
                  params: optplan.WaveguideModeSource,
                  work: Optional[workspace.Workspace] = None) -> None:
@@ -62,6 +66,7 @@ class WaveguideModeSource:
 
 @optplan.register_node(optplan.PlaneWaveSource)
 class PlaneWaveSource:
+
     def __init__(self,
                  params: optplan.PlaneWaveSource,
                  work: Optional[workspace.Workspace] = None) -> None:
@@ -143,6 +148,7 @@ class PlaneWaveSource:
 
 @optplan.register_node(optplan.GaussianSource)
 class GaussianSource:
+
     def __init__(self,
                  params: optplan.GaussianSource,
                  work: Optional[workspace.Workspace] = None) -> None:
@@ -153,9 +159,11 @@ class GaussianSource:
             work: Unused.
         """
         self._params = params
+        if self._params.beam_center is None:
+            self._params.beam_center = self._params.center
 
-    def __call__(self, simspace: SimulationSpace, wlen: float,
-                 solver: Callable, **kwargs) -> fdfd_tools.VecField:
+    def __call__(self, simspace: SimulationSpace, wlen: float, solver: Callable,
+                 **kwargs) -> fdfd_tools.VecField:
         """Creates the source vector.
 
         Args:
@@ -181,8 +189,57 @@ class GaussianSource:
             psi=self._params.psi,
             polarization_angle=self._params.polarization_angle,
             w0=self._params.w0,
-            center=self._params.center,
+            center=self._params.beam_center,
             power=self._params.power)
+
+        if self._params.normalize_by_sim:
+            source = fdfd_tools.free_space_sources.normalize_source_by_sim(
+                omega=2 * np.pi / wlen,
+                source=source,
+                eps=space_inst.eps_bg.grids,
+                dxes=simspace.dxes,
+                pml_layers=simspace.pml_layers,
+                solver=solver,
+                power=self._params.power)
+
+        return source
+
+
+@optplan.register_node(optplan.DipoleSource)
+class DipoleSource:
+
+    def __init__(self,
+                 params: optplan.DipoleSource,
+                 work: Optional[workspace.Workspace] = None) -> None:
+        self._params = params
+
+    def __call__(self, simspace: SimulationSpace, wlen: float, solver: Callable,
+                 **kwargs) -> fdfd_tools.VecField:
+        """Creates the source vector.
+
+        Args:
+            simspace: Simulation space.
+            wlen: Wavelength of source.
+            solver: If `normalize_by_source` is `True`, `solver` will be used
+                to run an EM simulation to normalize the source power.
+
+        Returns:
+            The source.
+        """
+        phase = self._params.phase
+        if phase is None:
+            phase = 0
+
+        space_inst = simspace(wlen)
+        source = fdfd_solvers.dipole.build_dipole_source(
+            omega=2 * np.pi / wlen,
+            dxes=simspace.dxes,
+            eps=space_inst.eps_bg.grids,
+            position=space_inst.eps_bg.pos2ind(self._params.position,
+                                               which_shifts=None).astype(int),
+            axis=self._params.axis,
+            power=self._params.power,
+            phase=np.exp(1j * phase))
 
         if self._params.normalize_by_sim:
             source = fdfd_tools.free_space_sources.normalize_source_by_sim(
@@ -343,8 +400,8 @@ class FdfdSimulation(problem.OptimizationFunction):
             if cache_item is None:
                 continue
             cache_struc, cache_source, cache_fields = cache_item
-            if (np.array_equal(eps, cache_struc)
-                    and np.array_equal(source, cache_source)):
+            if (np.array_equal(eps, cache_struc) and
+                    np.array_equal(source, cache_source)):
                 electric_fields = cache_fields
                 # Remove the hit entry (it will be reinserted later).
                 del self._cache_adjoint[cache_index]
@@ -406,19 +463,19 @@ def create_fdfd_simulation(params: optplan.FdfdSimulation,
     solver = _create_solver(params.solver, simspace)
     bloch_vector = params.get("bloch_vector", np.zeros(3))
 
-    source = work.get_object(params.source)(
-        simspace, params.wavelength, solver=solver)
+    source = work.get_object(params.source)(simspace,
+                                            params.wavelength,
+                                            solver=solver)
     if isinstance(source, tuple):
         source, bloch_vector = source
 
-    return FdfdSimulation(
-        eps=work.get_object(params.epsilon),
-        solver=solver,
-        wlen=params.wavelength,
-        source=source,
-        simspace=simspace,
-        bloch_vector=bloch_vector,
-        cache_size=1)
+    return FdfdSimulation(eps=work.get_object(params.epsilon),
+                          solver=solver,
+                          wlen=params.wavelength,
+                          source=source,
+                          simspace=simspace,
+                          bloch_vector=bloch_vector,
+                          cache_size=1)
 
 
 class Epsilon(problem.OptimizationFunction):
@@ -478,8 +535,7 @@ class Epsilon(problem.OptimizationFunction):
         # so the factor of 2 is cancelled out.
         return [
             np.real(
-                np.squeeze(
-                    np.asarray(grad_val @ self._space.selection_matrix)))
+                np.squeeze(np.asarray(grad_val @ self._space.selection_matrix)))
         ]
 
     def __str__(self):
@@ -489,14 +545,14 @@ class Epsilon(problem.OptimizationFunction):
 @optplan.register_node(optplan.Epsilon)
 def create_epsilon(params: optplan.Epsilon,
                    work: workspace.Workspace) -> Epsilon:
-    return Epsilon(
-        input_function=work.get_object(workspace.VARIABLE_NODE),
-        wlen=params.wavelength,
-        simspace=work.get_object(params.simulation_space))
+    return Epsilon(input_function=work.get_object(workspace.VARIABLE_NODE),
+                   wlen=params.wavelength,
+                   simspace=work.get_object(params.simulation_space))
 
 
 @optplan.register_node(optplan.WaveguideModeOverlap)
 class WaveguideModeOverlap:
+
     def __init__(self,
                  params: optplan.WaveguideModeOverlap,
                  work: workspace.Workspace = None) -> None:
@@ -523,6 +579,91 @@ class WaveguideModeOverlap:
             axis=gridlock.axisvec2axis(self._params.normal),
             polarity=gridlock.axisvec2polarity(self._params.normal),
             power=self._params.power)
+
+
+@optplan.register_node(optplan.ImportOverlap)
+class ImportOverlap:
+
+    def __init__(self,
+                 params: optplan.ImportOverlap,
+                 work: workspace.Workspace = None) -> None:
+        """Creates a new waveguide mode overlap.
+
+        Args:
+            params: Waveguide mode parameters.
+            work: Unused.
+        """
+        self._params = params
+
+    def __call__(self, simspace: SimulationSpace, wlen: float = None,
+                 **kwargs) -> fdfd_tools.VecField:
+        matpath = os.path.join(simspace._filepath, self._params.file_name)
+        overlap = sio.loadmat(matpath)
+
+        # Use reference_grid to get coords which the overlap fields are defined on.
+        reference_grid = simspace(wlen).eps_bg
+        overlap_grid = np.zeros(reference_grid.grids.shape, dtype=np.complex_)
+
+        xyz = reference_grid.xyz
+        dxyz = reference_grid.dxyz
+        shifts = reference_grid.shifts
+
+        overlap_comp = ["Ex", "Ey", "Ez"]
+        overlap_center = self._params.center
+
+        overlap_coords = [
+            overlap["x"][0] + overlap_center[0],
+            overlap["y"][0] + overlap_center[1],
+            overlap["z"][0] + overlap_center[2]
+        ]
+
+        # The interpolation done below only works on three-dimensional grids with each dimension containing
+        # more than a single grid point (i.e. no two-dimensional grids). Therefore, if a dimension has a
+        # singleton grid point, we duplicate along that axis to create a pseudo-3D grid.
+        coord_dims = np.array([
+            overlap_coords[0].size, overlap_coords[1].size,
+            overlap_coords[2].size
+        ])
+        singleton_dims = np.where(coord_dims == 1)[0]
+        if not singleton_dims.size == 0:
+            for axis in singleton_dims:
+                # The dx from the SPINS simulation grid is borrowed for the replication.
+                dx = dxyz[axis][0]
+                coord = overlap_coords[axis][0]
+                overlap_coords[axis] = np.insert(overlap_coords[axis], 0,
+                                                 coord - dx / 2)
+                overlap_coords[axis] = np.append(overlap_coords[axis],
+                                                 coord + dx / 2)
+                # Repeat the overlap fields along the extended axis
+                for comp in overlap_comp:
+                    overlap[comp] = np.repeat(overlap[comp],
+                                              overlap_coords[axis].size, axis)
+
+        for i in range(0, 3):
+
+            # Interpolate the user-specified overlap fields for use on the simulation grids
+            overlap_interp_function = RegularGridInterpolator(
+                (overlap_coords[0], overlap_coords[1], overlap_coords[2]),
+                overlap[overlap_comp[i]],
+                bounds_error=False,
+                fill_value=0.0)
+
+            # Grid coordinates for each component of Electric field. Shifts due to Yee lattice offsets.
+            # See documentation of ``Grid" class for more detailed explanation.
+            xs = xyz[0] + dxyz[0] * shifts[i, 0]
+            ys = xyz[1] + dxyz[1] * shifts[i, 1]
+            zs = xyz[2] + dxyz[2] * shifts[i, 2]
+
+            # Evaluate the interpolated overlap fields on simulationg rids
+            eval_coord_grid = np.meshgrid(xs, ys, zs, indexing='ij')
+            eval_coord_points = np.reshape(eval_coord_grid, (3, -1),
+                                           order='C').T
+            interp_overlap = overlap_interp_function(eval_coord_points)
+            overlap_grid[i] = np.reshape(interp_overlap,
+                                         (len(xs), len(ys), len(zs)),
+                                         order='C')
+
+        return overlap_grid
 
 
 # TODO(logansu): This function appears just to be an inner product.
@@ -577,8 +718,8 @@ def create_overlap_function(params: optplan.ProblemGraphNode,
     simspace = work.get_object(params.simulation.simulation_space)
     wlen = params.simulation.wavelength
     overlap = fdfd_tools.vec(work.get_object(params.overlap)(simspace, wlen))
-    return OverlapFunction(
-        input_function=work.get_object(params.simulation), overlap=overlap)
+    return OverlapFunction(input_function=work.get_object(params.simulation),
+                           overlap=overlap)
 
 
 # TODO(logansu): Merge this into `AbsoluteValue`.
@@ -660,5 +801,5 @@ def create_diff_epsilon(params: optplan.DiffEpsilon,
                 "Epsilon spec with type {} not yet supported".format(
                     params.epsilon_ref.type))
 
-    return DiffEpsilon(
-        epsilon=work.get_object(params.epsilon), epsilon_ref=epsilon_ref)
+    return DiffEpsilon(epsilon=work.get_object(params.epsilon),
+                       epsilon_ref=epsilon_ref)

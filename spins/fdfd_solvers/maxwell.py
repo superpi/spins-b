@@ -24,8 +24,9 @@ def upload_files(server_url: str, directory: str, filenames: List[str]):
             succeeded = False
             while not succeeded:
                 try:
-                    requests.post(
-                        server_url, data={'key': filename}, files={'file': f})
+                    requests.post(server_url,
+                                  data={'key': filename},
+                                  files={'file': f})
                     succeeded = True
                 except requests.exceptions.ConnectionError:
                     logger.exception('ConnectionError during upload: ' +
@@ -77,13 +78,13 @@ def write_field(filename_prefix: str, field):
 
 class MaxwellSolver:
     # Define default values for solver.
-    DEFAULT_ERROR_THRESHOLD = 1e-6
+    DEFAULT_ERROR_THRESHOLD = 1e-5
     DEFAULT_MAX_ITERS = 20000
     DEFAULT_MAXWELL_SERVER_PORT = 9041
 
     def __init__(self,
                  shape: np.ndarray,
-                 server='localhost:9041',
+                 server=os.getenv("MAXWELL_SERVER", "localhost:9041"),
                  err_thresh=DEFAULT_ERROR_THRESHOLD,
                  max_iters=DEFAULT_MAX_ITERS,
                  solver='CG'):
@@ -113,13 +114,18 @@ class MaxwellSolver:
               mu: np.ndarray = None,
               pec: np.ndarray = None,
               pmc: np.ndarray = None,
-              pemc: np.ndarray = np.zeros(6),
+              pemc: np.ndarray = None,
               bloch_vec: np.ndarray = None,
-              symmetry: np.ndarray = np.zeros(3),
+              symmetry: np.ndarray = None,
               adjoint: bool = False,
               E0: np.ndarray = None,
               solver_info: bool = False,
               n_eig: int = 1):
+        if symmetry is None:
+            symmetry = np.zeros(3)
+        if pemc is None:
+            pemc = np.zeros(6)
+
         server_url = 'http://' + self.server + '/'
 
         dxes = fdfd_tools.grid.apply_scpml(dxes, pml_layers, omega)
@@ -180,10 +186,14 @@ class MaxwellSolver:
                 new_dxes.append(dx)
             dxes = new_dxes
 
-            spx, spy, spz = np.meshgrid(
-                dxes[1][0], dxes[1][1], dxes[1][2], indexing='ij')
-            sdx, sdy, sdz = np.meshgrid(
-                dxes[0][0], dxes[0][1], dxes[0][2], indexing='ij')
+            spx, spy, spz = np.meshgrid(dxes[1][0],
+                                        dxes[1][1],
+                                        dxes[1][2],
+                                        indexing='ij')
+            sdx, sdy, sdz = np.meshgrid(dxes[0][0],
+                                        dxes[0][1],
+                                        dxes[0][2],
+                                        indexing='ij')
             mult = np.multiply
             s = [
                 mult(mult(sdx, spy), spz),
@@ -232,18 +242,18 @@ class MaxwellSolver:
 
             xyz = ['x', 'y', 'z']
             for direc in range(3):
-                f.create_dataset(
-                    'sd_' + xyz[direc] + 'r',
-                    data=np.real(dxes[0][direc]).astype(np.float64))
-                f.create_dataset(
-                    'sd_' + xyz[direc] + 'i',
-                    data=np.imag(dxes[0][direc]).astype(np.float64))
-                f.create_dataset(
-                    'sp_' + xyz[direc] + 'r',
-                    data=np.real(dxes[1][direc]).astype(np.float64))
-                f.create_dataset(
-                    'sp_' + xyz[direc] + 'i',
-                    data=np.imag(dxes[1][direc]).astype(np.float64))
+                f.create_dataset('sd_' + xyz[direc] + 'r',
+                                 data=np.real(dxes[0][direc]).astype(
+                                     np.float64))
+                f.create_dataset('sd_' + xyz[direc] + 'i',
+                                 data=np.imag(dxes[0][direc]).astype(
+                                     np.float64))
+                f.create_dataset('sp_' + xyz[direc] + 'r',
+                                 data=np.real(dxes[1][direc]).astype(
+                                     np.float64))
+                f.create_dataset('sp_' + xyz[direc] + 'i',
+                                 data=np.imag(dxes[1][direc]).astype(
+                                     np.float64))
         # Write the rest of the files.
         write_field(local_prefix + 'e', fdfd_tools.unvec(epsilon, shape))
         write_field(local_prefix + 'J', fdfd_tools.unvec(J, shape))
@@ -312,10 +322,10 @@ class MaxwellSolver:
                     (dummy, -np.flip(E[2][1:, :, :], 0), E[2]), axis=0)
             elif symmetry[0] == 2:
                 E[0] = np.concatenate((-np.flip(E[0], 0), E[0]), axis=0)
-                E[1] = np.concatenate(
-                    (dummy, np.flip(E[1][1:, :, :], 0), E[1]), axis=0)
-                E[2] = np.concatenate(
-                    (dummy, np.flip(E[2][1:, :, :], 0), E[2]), axis=0)
+                E[1] = np.concatenate((dummy, np.flip(E[1][1:, :, :], 0), E[1]),
+                                      axis=0)
+                E[2] = np.concatenate((dummy, np.flip(E[2][1:, :, :], 0), E[2]),
+                                      axis=0)
 
             dummy = np.expand_dims(np.zeros_like(E[1][:, 0, :]), 1)
             if symmetry[1] == 1:
@@ -325,11 +335,11 @@ class MaxwellSolver:
                 E[2] = np.concatenate(
                     (dummy, -np.flip(E[2][:, 1:, :], 1), E[2]), axis=1)
             elif symmetry[1] == 2:
-                E[0] = np.concatenate(
-                    (dummy, np.flip(E[0][:, 1:, :], 1), E[0]), axis=1)
+                E[0] = np.concatenate((dummy, np.flip(E[0][:, 1:, :], 1), E[0]),
+                                      axis=1)
                 E[1] = np.concatenate((-np.flip(E[1], 1), E[1]), axis=1)
-                E[2] = np.concatenate(
-                    (dummy, np.flip(E[2][:, 1:, :], 1), E[2]), axis=1)
+                E[2] = np.concatenate((dummy, np.flip(E[2][:, 1:, :], 1), E[2]),
+                                      axis=1)
 
             dummy = np.expand_dims(np.zeros_like(E[1][:, :, 0]), 2)
             if symmetry[2] == 1:
@@ -339,10 +349,10 @@ class MaxwellSolver:
                     (dummy, -np.flip(E[1][:, :, 1:], 2), E[1]), axis=2)
                 E[2] = np.concatenate((np.flip(E[2], 2), E[2]), axis=2)
             elif symmetry[2] == 2:
-                E[0] = np.concatenate(
-                    (dummy, np.flip(E[0][:, :, 1:], 2), E[0]), axis=2)
-                E[1] = np.concatenate(
-                    (dummy, np.flip(E[1][:, :, 1:], 2), E[1]), axis=2)
+                E[0] = np.concatenate((dummy, np.flip(E[0][:, :, 1:], 2), E[0]),
+                                      axis=2)
+                E[1] = np.concatenate((dummy, np.flip(E[1][:, :, 1:], 2), E[1]),
+                                      axis=2)
                 E[2] = np.concatenate((-np.flip(E[2], 2), E[2]), axis=2)
 
             return E
@@ -382,7 +392,6 @@ class MaxwellSolver:
             for i in range(3):
                 E[i] = np.multiply(E[i], np.conj(s[i]))
 
-
         # Remove downloaded files.
         if solver_info:
             file_prefix = os.path.join(download_dir, sim_name_prefix)
@@ -399,11 +408,12 @@ class MaxwellSolver:
             file_prefix = os.path.join(download_dir, sim_name_prefix)
             q = None
             with h5py.File(file_prefix + 'qr') as f:
-                q = f['data'].value.astype(np.complex128)
+                q = f['data'][()].astype(np.complex128)
             with h5py.File(file_prefix + 'qi') as f:
-                q += 1j * f['data'].value.astype(np.complex128)
+                q += 1j * f['data'][()].astype(np.complex128)
 
             shutil.rmtree(download_dir)
+
             return [fdfd_tools.vec(Q) for Q in E], q**(0.5)
         else:
             shutil.rmtree(download_dir)
